@@ -1,0 +1,32 @@
+﻿{
+  "_comment": "Конфигурация для скриптов удаленного выполнения",
+  "_warning1": "Для избежания ошибок парсинга файла, удалите блок с комментариями",
+  "_warning2": "Не используйте и не храниете пароли в открытом виде без крайней необходимости!!",
+  "_warning3": "При необходимости использовать пароль в открытом виде, задаем переменные passwordPlain",
+  "_path_comment_smb1": "Путь для SMB формируется по принципу //server/shareName/filesFullPath (слеши на самом деле обратные)",
+  "_path_comment_smb2": "В текущем примере это //netshare.local/share/files (слеши на самом деле обратные)",
+  "_path_comment_smb3": "Поле User поддерживает указание домена, например domain\\user (используем двойной обратный слеш)",
+  "_path_comment_ftp1": "Путь для FTP формируется по принципу ftp://server/filesFullPath",
+  "_path_comment_ftp2": "В текущем примере это ftp://ftp.company.local/ftp/files",
+  "_path_comment_ftp3": "При необходимости использовать нестандартный порт, дописываем номер порта к имени или ip сервера, например: 192.168.1.2:4421 или ftp.server.local:1121",
+  "protocolScripts": "ftp",
+  "protocolLogs": "smb",
+  "protocolFiles": "ftp",
+  "smb": {
+    "server": "netshare.local",
+    "shareName": "share",
+    "scriptsFullPath": "scripts",
+    "logsFullPath": "logs",
+    "filesFullPath": "files",
+    "user": "smb_user_login",
+    "passwordPlain": ""
+  },
+  "ftp": {
+    "server": "ftp.company.local",
+    "scriptsFullPath": "ftp/scripts",
+    "logsFullPath": "ftp/logs",
+    "filesFullPath": "ftp/files",
+    "user": "ftp_user_login",
+    "passwordPlain": ""
+  }
+}
