@@ -1,14 +1,39 @@
-﻿#Requires -RunAsAdministrator
+﻿[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false)]
+    [switch]$Silent,
+
+    [Parameter(Mandatory = $false)]
+    [string]$AdminPassword,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseSystemAccount,
+
+    [Parameter(Mandatory = $false)]
+    [string]$PassFTP,
+
+    [Parameter(Mandatory = $false)]
+    [string]$PassFTPS,
+
+    [Parameter(Mandatory = $false)]
+    [string]$PassSMB
+)
+
+# Проверяем, есть ли у нас права администратора
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Host "`nСкрипт необходимо запускать с правами администратора" -ForegroundColor Red
+    exit 1
+}
 
 # ======================== КОНФИГУРАЦИЯ ========================
 $scriptsFolder = $PSScriptRoot
 $tasksFolder = "RemoteAuto"
-$admin_username = "local_admin_runner"
+$admin_username = "special_user_auto"
 $targetRootFolder = "C:\ProgramData\Remote_Auto"
 $targetScriptsFolder = "$targetRootFolder\start_ps1"
-
-# === ОПЦИЯ: Пароль для локального администратора в открытом виде ===
-#$plain_password = "Super-Secret5-Passw0rd"
+$plain_password = if ($Silent -and $AdminPassword) { $AdminPassword } else { $null }
 
 # ======================== ПОДГОТОВКА ПАПКИ ДЛЯ СКРИПТОВ ========================
 Write-Host "`n=== ПОДГОТОВКА ПАПКИ ДЛЯ СКРИПТОВ ===" -ForegroundColor Yellow
@@ -34,7 +59,6 @@ try {
     # Копируем конфигурационный файл
     Copy-Item -Path "$PSScriptRoot\config_vars.json" -Destination "$targetRootFolder\config_vars.json" -Force
     Write-Host "Файл конфигурации скопирован: config_vars.json -> $targetRootFolder" -ForegroundColor Green
-    
 
     # Обновляем рабочую папку скриптов
     $scriptsFolder = $targetScriptsFolder
@@ -59,106 +83,158 @@ catch {
     exit 1
 }
 
-# ======================== ВЫБОР УЧЕТНОЙ ЗАПИСИ ========================
-Write-Host "`n=== ВЫБОР УЧЕТНОЙ ЗАПИСИ ===" -ForegroundColor Yellow
-Write-Host "1. NT AUTHORITY\SYSTEM (Локальная система)" -ForegroundColor Yellow
-Write-Host "2. Создать отдельного администратора $admin_username (рекомендуется)" -ForegroundColor Yellow
+# ======================== ВЫБОР УЧЕТНОЙ ЗАПИСИ (ТИХИЙ РЕЖИМ) ========================
+if ($Silent) {
+    # Автоматический выбор учетной записи администратора
+    if ($UseSystemAccount) {
+        $accountChoice = 1
+        $taskUser = "NT AUTHORITY\SYSTEM"
+        Write-Host "`nТихий режим: задачи будут запускаться от имени SYSTEM" -ForegroundColor Green
+    }
+    else {
+        $accountChoice = 2
+        $taskUser = "$env:COMPUTERNAME\$admin_username"
+        $passwordText = $AdminPassword
 
-$accountChoice = Read-Host "Введите номер (по умолчанию 2)"
-if (-not $accountChoice) { $accountChoice = 2 }
+        try {
+            # Настраиваем политику срока жизни паролей
+            net accounts /maxpwage:unlimited | Out-Null
 
-$taskUser = $null
-$passwordText = $null
-
-if ($accountChoice -eq 2) {
-    # Функция безопасного ввода пароля
-    function Get-SecurePassword {
-        param([Parameter(Mandatory=$true)][string]$Prompt)
-        do {
-            Write-Host $Prompt -ForegroundColor Cyan -NoNewline
-            $pass1 = Read-Host -AsSecureString
-            
-            if (-not $pass1 -or $pass1.Length -eq 0) {
-                Write-Host "Пароль не может быть пустым!" -ForegroundColor Red
-                continue
-            }
-            
-            Write-Host "Повторите пароль: " -ForegroundColor Cyan -NoNewline
-            $pass2 = Read-Host -AsSecureString
-            
-            $plain1 = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-                [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pass1))
-            $plain2 = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-                [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pass2))
-            
-            if ($plain1 -ne $plain2) {
-                Write-Host "Пароли не совпадают!" -ForegroundColor Red
+            # Создание/обновление пользователя
+            $securePassword = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
+            if (-not (Get-LocalUser -Name $admin_username -ErrorAction SilentlyContinue)) {
+                New-LocalUser -Name $admin_username -Password $securePassword `
+                    -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
+                Write-Host "Аккаунт $admin_username успешно создан!" -ForegroundColor Green
             }
             else {
-                return $pass1
+                Set-LocalUser -Name $admin_username -Password $securePassword -PasswordNeverExpires $true -ErrorAction Stop
+                Write-Host "Аккаунт $admin_username успешно обновлен!" -ForegroundColor Green
+            }
+
+            # Скрытие пользователя
+            $regPath = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
+            if (-not (Test-Path $regPath)) { 
+                New-Item -Path $regPath -Force -ErrorAction Stop | Out-Null 
+            }
+            Set-ItemProperty -Path $regPath -Name $admin_username -Value 0 -Type DWord -Force -ErrorAction Stop
+
+            # Добавление в группу администраторов
+            $adminGroup = Get-LocalGroup -SID "S-1-5-32-544" -ErrorAction Stop
+            if (-not (Get-LocalGroupMember -Group $adminGroup -Member $admin_username -ErrorAction SilentlyContinue)) {
+                Add-LocalGroupMember -Group $adminGroup -Member $admin_username -ErrorAction Stop
             }
             
-            $plain1 = $null; $plain2 = $null; [GC]::Collect()
-        } while ($true)
+            Write-Host "`nЗадачи будут запускаться от имени: $taskUser" -ForegroundColor Green
+        }
+        catch {
+            Write-Error "ОШИБКА создания аккаунта в тихом режиме: $_"
+            exit 1
+        }
     }
+}
+# ======================== ВЫБОР УЧЕТНОЙ ЗАПИСИ (ИНТЕРАКТИВНЫЙ РЕЖИМ) ========================
+else {
+    Write-Host "`n=== ВЫБОР УЧЕТНОЙ ЗАПИСИ ===" -ForegroundColor Yellow
+    Write-Host "1. NT AUTHORITY\SYSTEM (Локальная система)" -ForegroundColor Yellow
+    Write-Host "2. Создать отдельного администратора $admin_username (рекомендуется)" -ForegroundColor Yellow
 
-    if ($plain_password) {
-        Write-Host "`nИспользуется пароль из переменной" -ForegroundColor Yellow
-        $admin_password = ConvertTo-SecureString $plain_password -AsPlainText -Force
-    }
-    else {
-        Write-Host "`n=== СОЗДАНИЕ АДМИНИСТРАТОРА ===" -ForegroundColor Yellow
-        $admin_password = Get-SecurePassword -Prompt "Введите пароль для $admin_username`: "
-    }
+    $accountChoice = Read-Host "Введите номер (по умолчанию 2)"
+    if (-not $accountChoice) { $accountChoice = 2 }
 
-    try {
-        # Настраиваем политику срока жизни паролей (для систем без домена)
-        net accounts /maxpwage:unlimited | Out-Null
+    $taskUser = $null
+    $passwordText = $null
 
-        # Создание/обновление пользователя
-        if (-not (Get-LocalUser -Name $admin_username -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $admin_username -Password $admin_password `
-                -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
+    if ($accountChoice -eq 2) {
+        # Функция безопасного ввода пароля
+        function Get-SecurePassword {
+            param([Parameter(Mandatory=$true)][string]$Prompt)
+            do {
+                Write-Host $Prompt -ForegroundColor Cyan -NoNewline
+                $pass1 = Read-Host -AsSecureString
+                
+                if (-not $pass1 -or $pass1.Length -eq 0) {
+                    Write-Host "Пароль не может быть пустым!" -ForegroundColor Red
+                    continue
+                }
+                
+                Write-Host "Повторите пароль: " -ForegroundColor Cyan -NoNewline
+                $pass2 = Read-Host -AsSecureString
+                
+                $plain1 = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                    [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pass1))
+                $plain2 = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                    [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pass2))
+                
+                if ($plain1 -ne $plain2) {
+                    Write-Host "Пароли не совпадают!" -ForegroundColor Red
+                }
+                else {
+                    return $pass1
+                }
+                
+                $plain1 = $null; $plain2 = $null; [GC]::Collect()
+            } while ($true)
+        }
+
+        if ($plain_password) {
+            Write-Host "`nИспользуется пароль из переменной" -ForegroundColor Yellow
+            $admin_password = ConvertTo-SecureString $plain_password -AsPlainText -Force
         }
         else {
-            Set-LocalUser -Name $admin_username -Password $admin_password -PasswordNeverExpires $true -ErrorAction Stop
+            Write-Host "`n=== СОЗДАНИЕ АДМИНИСТРАТОРА ===" -ForegroundColor Yellow
+            $admin_password = Get-SecurePassword -Prompt "Введите пароль для $admin_username`: "
         }
 
-        # Скрытие пользователя
-        $regPath = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
-        if (-not (Test-Path $regPath)) { 
-            New-Item -Path $regPath -Force -ErrorAction Stop | Out-Null 
-        }
-        Set-ItemProperty -Path $regPath -Name $admin_username -Value 0 -Type DWord -Force -ErrorAction Stop
+        try {
+            # Настраиваем политику срока жизни паролей (для систем без домена)
+            net accounts /maxpwage:unlimited | Out-Null
 
-        # Добавление в группу администраторов
-        $adminGroup = Get-LocalGroup -SID "S-1-5-32-544" -ErrorAction Stop
-        if (-not (Get-LocalGroupMember -Group $adminGroup -Member $admin_username -ErrorAction SilentlyContinue)) {
-            Add-LocalGroupMember -Group $adminGroup -Member $admin_username -ErrorAction Stop
+            # Создание/обновление пользователя
+            if (-not (Get-LocalUser -Name $admin_username -ErrorAction SilentlyContinue)) {
+                New-LocalUser -Name $admin_username -Password $admin_password `
+                    -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
+            }
+            else {
+                Set-LocalUser -Name $admin_username -Password $admin_password -PasswordNeverExpires $true -ErrorAction Stop
+            }
+
+            # Скрытие пользователя
+            $regPath = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
+            if (-not (Test-Path $regPath)) { 
+                New-Item -Path $regPath -Force -ErrorAction Stop | Out-Null 
+            }
+            Set-ItemProperty -Path $regPath -Name $admin_username -Value 0 -Type DWord -Force -ErrorAction Stop
+
+            # Добавление в группу администраторов
+            $adminGroup = Get-LocalGroup -SID "S-1-5-32-544" -ErrorAction Stop
+            if (-not (Get-LocalGroupMember -Group $adminGroup -Member $admin_username -ErrorAction SilentlyContinue)) {
+                Add-LocalGroupMember -Group $adminGroup -Member $admin_username -ErrorAction Stop
+            }
+            
+            Write-Host "`nАккаунт $admin_username успешно создан!" -ForegroundColor Green
         }
+        catch {
+            Write-Error "ОШИБКА создания аккаунта: $_"
+            exit 1
+        }
+
+        $taskUser = "$env:COMPUTERNAME\$admin_username"
         
-        Write-Host "`nАккаунт $admin_username успешно создан!" -ForegroundColor Green
-    }
-    catch {
-        Write-Error "ОШИБКА создания аккаунта: $_"
-        exit 1
-    }
-
-    $taskUser = "$env:COMPUTERNAME\$admin_username"
-    
-    if ($plain_password) {
-        $passwordText = $plain_password
+        if ($plain_password) {
+            $passwordText = $plain_password
+        }
+        else {
+            $passwordText = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($admin_password))
+        }
     }
     else {
-        $passwordText = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($admin_password))
+        $taskUser = "NT AUTHORITY\SYSTEM"
     }
-}
-else {
-    $taskUser = "NT AUTHORITY\SYSTEM"
-}
 
-Write-Host "`nЗадачи будут запускаться от имени: $taskUser" -ForegroundColor Green
+    Write-Host "`nЗадачи будут запускаться от имени: $taskUser" -ForegroundColor Green
+}
 
 # ======================== НАСТРОЙКА ЗАДАЧ ПЛАНИРОВЩИКА ========================
 Write-Host "`n=== СОЗДАНИЕ ЗАДАЧ ПЛАНИРОВЩИКА ===" -ForegroundColor Yellow
@@ -229,10 +305,8 @@ function Register-Task {
         $params['User'] = $taskUser
         $params['Password'] = $passwordText
     }
-
     else {
-    # Указываем SYSTEM для выбора 1
-    $params['User'] = "NT AUTHORITY\SYSTEM"
+        $params['User'] = "NT AUTHORITY\SYSTEM"
     }
 
     # Регистрируем задачу
@@ -373,17 +447,18 @@ Write-Host "`n=== ПРОВЕРКА УЧЕТНЫХ ДАННЫХ ===" -ForegroundC
 
 $credsFolder = "$targetRootFolder\creds"
 $credFtpPath = Join-Path $credsFolder "cred_ftp_pwd.txt"
+$credFtpsPath = Join-Path $credsFolder "cred_ftps_pwd.txt"
 $credSmbPath = Join-Path $credsFolder "cred_smb_pwd.txt"
 $encKeyPath = Join-Path $credsFolder "encryption_key.bin"
 
 $filesMissing = $false
 
 # Проверяем наличие хотя бы одного файла учетных данных
-$anyCredFileExists = (Test-Path $credFtpPath) -or (Test-Path $credSmbPath)
+$anyCredFileExists = (Test-Path $credFtpPath) -or (Test-Path $credSmbPath) -or (Test-Path $credFtpsPath)
 
 if (-not $anyCredFileExists) {
     Write-Host "Отсутствуют файлы учетных данных!" -ForegroundColor Red
-    Write-Host "Не найден ни один из файлов: cred_ftp_pwd.txt или cred_smb_pwd.txt" -ForegroundColor Red
+    Write-Host "Не найден ни один из файлов: cred_ftp_pwd.txt, cred_smb_pwd.txt или cred_ftps_pwd.txt" -ForegroundColor Red
     $filesMissing = $true
 }
 
@@ -393,47 +468,113 @@ if (-not (Test-Path $encKeyPath)) {
 }
 
 if ($filesMissing) {
-    Write-Host "`n=== ТРЕБУЕТСЯ ДЕЙСТВИЕ ===" -ForegroundColor Red
-    Write-Host "Необходимые файлы учетных данных отсутствуют!" -ForegroundColor Red
-    
-    $generatorScript = Join-Path $PSScriptRoot "password_credfile_generator.ps1"
-    
-    if (Test-Path $generatorScript) {
-        # Запрос на генерацию пароля
-        $generateChoice = Read-Host "`nСгенерировать пароль для FTP/SMB? (Y/N)"
-        if ($generateChoice -eq 'Y' -or $generateChoice -eq 'y') {
+    # Для тихого режима - автоматический запуск генератора
+    if ($Silent) {
+        $generatorScript = Join-Path $PSScriptRoot "password_credfile_generator.ps1"
+        if (Test-Path $generatorScript) {
             try {
-                Write-Host "Запуск генератора учетных данных..." -ForegroundColor Cyan
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$generatorScript`"
-                Write-Host "`nГенерация учетных данных завершена!" -ForegroundColor Green
+                Write-Host "Автоматический запуск генератора учетных данных..." -ForegroundColor Cyan
                 
-                # Повторная проверка файлов
-                $anyCredFileExists = (Test-Path $credFtpPath) -or (Test-Path $credSmbPath)
-                
-                if ($anyCredFileExists -and (Test-Path $encKeyPath)) {
-                    Write-Host "Файлы учетных данных успешно созданы" -ForegroundColor Green
+                # Формируем параметры для запуска с использованием splatting
+                $generatorParams = @{}
+                if ($PSBoundParameters.ContainsKey('PassFTP') -and $PassFTP) {
+                    $generatorParams['PassFTP'] = $PassFTP
+                }
+                if ($PSBoundParameters.ContainsKey('PassFTPS') -and $PassFTPS) {
+                    $generatorParams['PassFTPS'] = $PassFTPS
+                }
+                if ($PSBoundParameters.ContainsKey('PassSMB') -and $PassSMB) {
+                    $generatorParams['PassSMB'] = $PassSMB
+                }
+
+                # Запускаем генератор с параметрами
+                if ($generatorParams.Count -gt 0) {
+                    & $generatorScript @generatorParams
                 }
                 else {
-                    Write-Host "`nОШИБКА: Не все файлы учетных данных созданы!" -ForegroundColor Red
-                    Write-Host "Пожалуйста, создайте их вручную с помощью скрипта: $generatorScript" -ForegroundColor Yellow
+                    & $generatorScript
+                }
+                
+                Write-Host "Генерация учетных данных завершена!" -ForegroundColor Green
+                
+                # Проверяем результат генерации
+                $anyCredFileExistsAfter = (Test-Path $credFtpPath) -or (Test-Path $credSmbPath) -or (Test-Path $credFtpsPath)
+                $encKeyExistsAfter = Test-Path $encKeyPath
+                
+                if (-not $anyCredFileExistsAfter -or -not $encKeyExistsAfter) {
+                    Write-Error "После генерации все еще отсутствуют необходимые файлы учетных данных или ключ шифрования."
+                    exit 1
                 }
             }
             catch {
-                Write-Host "`nОШИБКА при запуске генератора: $_" -ForegroundColor Red
-                Write-Host "Запустите скрипт вручную: $generatorScript" -ForegroundColor Yellow
+                Write-Error "Ошибка при запуске генератора учетных данных: $_"
+                exit 1
             }
         }
         else {
-            Write-Host "`nДля создания файлов учетных данных выполните:" -ForegroundColor Yellow
-            Write-Host "1. Запустите скрипт: $generatorScript" -ForegroundColor Yellow
-            Write-Host "2. Следуйте инструкциям по вводу данных FTP/SMB" -ForegroundColor Yellow
+            Write-Error "Скрипт генератора не найден: $generatorScript"
+            exit 1
         }
     }
+    # Для интерактивного режима - запрос на запуск генератора
     else {
-        Write-Host "Скрипт для создания учетных данных не найден: $generatorScript" -ForegroundColor Red
-        Write-Host "Убедитесь, что файл password_credfile_generator.ps1 находится в папке: $PSScriptRoot" -ForegroundColor Yellow
+        Write-Host "`n=== ТРЕБУЕТСЯ ДЕЙСТВИЕ ===" -ForegroundColor Red
+        Write-Host "Необходимые файлы учетных данных отсутствуют!" -ForegroundColor Red
+        
+        $generatorScript = Join-Path $PSScriptRoot "password_credfile_generator.ps1"
+        
+        if (Test-Path $generatorScript) {
+            # Запрос на генерацию пароля
+            $generateChoice = Read-Host "`nСгенерировать пароль для FTP / FTPS / SMB ? (Y/N)"
+            if ($generateChoice -eq 'Y' -or $generateChoice -eq 'y') {
+                try {
+                    Write-Host "Запуск генератора учетных данных..." -ForegroundColor Cyan
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$generatorScript`"
+                    Write-Host "`nГенерация учетных данных завершена!" -ForegroundColor Green
+                    
+                    # Повторная проверка файлов
+                    $anyCredFileExists = (Test-Path $credFtpPath) -or (Test-Path $credSmbPath) -or (Test-Path $credFtpsPath)
+                    
+                    if ($anyCredFileExists -and (Test-Path $encKeyPath)) {
+                        Write-Host "Файлы учетных данных успешно созданы" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "`nОШИБКА: Не все файлы учетных данных созданы!" -ForegroundColor Red
+                        Write-Host "Пожалуйста, создайте их вручную с помощью скрипта: $generatorScript" -ForegroundColor Yellow
+                    }
+                }
+                catch {
+                    Write-Host "`nОШИБКА при запуске генератора: $_" -ForegroundColor Red
+                    Write-Host "Запустите скрипт вручную: $generatorScript" -ForegroundColor Yellow
+                }
+            }
+            else {
+                Write-Host "`nДля создания файлов учетных данных выполните:" -ForegroundColor Yellow
+                Write-Host "1. Запустите скрипт: $generatorScript" -ForegroundColor Yellow
+                Write-Host "2. Следуйте инструкциям по вводу данных FTP / FTPS / SMB" -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "Скрипт для создания учетных данных не найден: $generatorScript" -ForegroundColor Red
+            Write-Host "Убедитесь, что файл password_credfile_generator.ps1 находится в папке: $PSScriptRoot" -ForegroundColor Yellow
+        }
     }
 }
 else {
     Write-Host "Файлы учетных данных присутствуют" -ForegroundColor Green
+}
+
+if ($Silent) {
+    # Очистка параметров паролей
+    $PassFTP = $null
+    $PassFTPS = $null
+    $PassSMB = $null
+    Remove-Variable PassFTP, PassFTPS, PassSMB -Force -ErrorAction SilentlyContinue
+    [GC]::Collect()
+
+    Write-Host "`nТихая установка завершена успешно!" -ForegroundColor Green
+    Write-Host "Создано 4 задачи в папке: \$tasksFolder" -ForegroundColor Cyan
+    if (-not $UseSystemAccount) {
+        Write-Host "Задачи запускаются от имени: $taskUser" -ForegroundColor Cyan
+    }
 }

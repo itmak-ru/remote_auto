@@ -12,6 +12,22 @@
   "protocolScripts": "ftp",
   "protocolLogs": "smb",
   "protocolFiles": "ftp",
+  "ftp": {
+    "server": "ftp.company.local",
+    "scriptsFullPath": "ftp/scripts",
+    "logsFullPath": "ftp/logs",
+    "filesFullPath": "ftp/files",
+    "user": "ftp_user_login",
+    "passwordPlain": ""
+  },
+  "ftps": {
+    "server": "ftp.company.local",
+    "scriptsFullPath": "ftp/scripts",
+    "logsFullPath": "ftp/logs",
+    "filesFullPath": "ftp/files",
+    "user": "ftp_user_login",
+    "passwordPlain": ""
+  },
   "smb": {
     "server": "netshare.local",
     "shareName": "share",
@@ -19,14 +35,6 @@
     "logsFullPath": "logs",
     "filesFullPath": "files",
     "user": "smb_user_login",
-    "passwordPlain": ""
-  },
-  "ftp": {
-    "server": "ftp.company.local",
-    "scriptsFullPath": "ftp/scripts",
-    "logsFullPath": "ftp/logs",
-    "filesFullPath": "ftp/files",
-    "user": "ftp_user_login",
     "passwordPlain": ""
   }
 }

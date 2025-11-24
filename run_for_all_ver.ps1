@@ -18,8 +18,8 @@ catch {
 $protocolScripts = $config.protocolScripts
 $protocolLogs = $config.protocolLogs
 
-if (-not ($protocolScripts -in @("smb", "ftp")) -or -not ($protocolLogs -in @("smb", "ftp"))) {
-    Write-Error "Неверный протокол в конфиге. Допустимые значения: 'smb' или 'ftp'"
+if (-not ($protocolScripts -in @("smb", "ftp", "ftps")) -or -not ($protocolLogs -in @("smb", "ftp", "ftps"))) {
+    Write-Error "Неверный протокол. Допустимые значения: 'smb', 'ftp', 'ftps'"
     exit 1
 }
 
@@ -31,7 +31,7 @@ function Get-ProtocolCredentials {
         [Parameter(Mandatory=$true)]
         [string]$ProtocolType,
         [Parameter(Mandatory=$true)]
-        [ValidateSet('smb','ftp')]
+        [ValidateSet('smb','ftp','ftps')]
         [string]$Protocol
     )
     
@@ -69,7 +69,7 @@ function Get-ProtocolCredentials {
         }
 
         # Создание учетных данных
-        if ($Protocol -eq 'ftp') {
+        if ($Protocol -in @("ftp", "ftps")) {
             return New-Object System.Net.NetworkCredential($user, $securePass)
         }
         else {
@@ -92,7 +92,7 @@ $credLogs = Get-ProtocolCredentials -ProtocolConfig $configLogs -ProtocolType "�
 
 # ===== ФОРМИРОВАНИЕ ПУТЕЙ =====
 # Для скриптов
-if ($protocolScripts -eq "ftp") {
+if ($protocolScripts -in @("ftp", "ftps")) {
     $remoteScriptsPath = "ftp://$($configScripts.server)/$($configScripts.scriptsFullPath)/" -replace '(?<!:)/{2,}', '/'
 }
 else {
@@ -101,7 +101,7 @@ else {
 }
 
 # Для логов
-if ($protocolLogs -eq "ftp") {
+if ($protocolLogs -in @("ftp", "ftps")) {
     $remoteLogsPath = "ftp://$($configLogs.server)/$($configLogs.logsFullPath)/" -replace '(?<!:)/{2,}', '/'
 }
 else {
@@ -149,14 +149,18 @@ $computerName = $env:COMPUTERNAME
 # ===== ПОЛУЧЕНИЕ СПИСКА СКРИПТОВ =====
 $versions = @()
 
-if ($protocolScripts -eq "ftp") {
-    # Получение списка через FTP
+if ($protocolScripts -in @("ftp", "ftps")) {
     try {
-        $ftpRequest = [System.Net.FtpWebRequest]::Create($remoteScriptsPath)
-        $ftpRequest.Credentials = $credScripts
-        $ftpRequest.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectory
-
-        $response = $ftpRequest.GetResponse()
+        $request = [System.Net.FtpWebRequest]::Create($remoteScriptsPath)
+        $request.Credentials = $credScripts
+        $request.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectory
+        
+        # Включаем SSL только для FTPS
+        if ($protocolScripts -eq "ftps") {
+            $request.EnableSsl = $true
+        }
+        
+        $response = $request.GetResponse()
         $streamReader = New-Object IO.StreamReader($response.GetResponseStream())
         $files = $streamReader.ReadToEnd() -split "`r`n" | Where-Object { $_ -match '^run_for_all_v\d+\.ps1$' }
         $versions = $files | ForEach-Object { 
@@ -166,7 +170,7 @@ if ($protocolScripts -eq "ftp") {
         $response.Close()
     }
     catch {
-        Write-Error "Ошибка подключения к FTP (скрипты): $_"
+        Write-Error "Ошибка подключения к $($protocolScripts.ToUpper()) (скрипты): $_"
         exit 1
     }
 }
@@ -216,15 +220,33 @@ $targetVersion = $newVersions | Select-Object -First 1
 
 # ===== ЗАГРУЗКА СКРИПТА =====
 $localScript = Join-Path $localScriptsDir "run_for_all_v$targetVersion.ps1"
+$scriptFileName = "run_for_all_v$targetVersion.ps1"
 
-if ($protocolScripts -eq "ftp") {
-    # Загрузка через FTP
+if ($protocolScripts -in @("ftp", "ftps")) {
+    # Загрузка через FTP / FTPS
     try {
-        $webClient = New-Object System.Net.WebClient
-        $webClient.Credentials = $credScripts
-        $remoteScript = "${remoteScriptsPath}run_for_all_v$targetVersion.ps1"
-        $webClient.DownloadFile($remoteScript, $localScript)
-        $webClient.Dispose()
+        $remoteScript = "${remoteScriptsPath}${scriptFileName}"
+        
+        $request = [System.Net.FtpWebRequest]::Create($remoteScript)
+        $request.Credentials = $credScripts
+        $request.Method = [System.Net.WebRequestMethods+Ftp]::DownloadFile
+        
+        if ($protocolScripts -eq "ftps") {
+            $request.EnableSsl = $true
+        }
+        
+        $response = $request.GetResponse()
+        $responseStream = $response.GetResponseStream()
+        $fileStream = [System.IO.File]::Create($localScript)
+        
+        $buffer = New-Object byte[] 10240
+        while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $fileStream.Write($buffer, 0, $read)
+        }
+        
+        $fileStream.Close()
+        $responseStream.Close()
+        $response.Close()
     }
     catch {
         Write-Error "Ошибка загрузки скрипта: $_"
@@ -335,17 +357,28 @@ try {
     Write-Log "Скрипт заархивирован: $archivePath"
 
     # ===== ОТПРАВКА ЛОГА =====
-    if ($protocolLogs -eq "ftp") {
-        # Выгрузка на FTP
+    if ($protocolLogs -in @("ftp", "ftps")) {
+        # Отправка через FTP / FTPS
         try {
-            $webClient = New-Object System.Net.WebClient
-            $webClient.Credentials = $credLogs
-            
             $remoteLog = "${remoteLogsPath}$logName"
-            $webClient.UploadFile($remoteLog, [System.Net.WebRequestMethods+Ftp]::UploadFile, $localLog)
-            $webClient.Dispose()
             
-            Write-Log "Лог успешно выгружен на FTP: $remoteLog"
+            $request = [System.Net.FtpWebRequest]::Create($remoteLog)
+            $request.Credentials = $credLogs
+            $request.Method = [System.Net.WebRequestMethods+Ftp]::UploadFile
+            
+            if ($protocolLogs -eq "ftps") {
+                $request.EnableSsl = $true
+            }
+            
+            $fileContent = [System.IO.File]::ReadAllBytes($localLog)
+            $requestStream = $request.GetRequestStream()
+            $requestStream.Write($fileContent, 0, $fileContent.Length)
+            $requestStream.Close()
+            
+            $response = $request.GetResponse()
+            $response.Close()
+            
+            Write-Log "Лог успешно выгружен на $($protocolLogs.ToUpper()): $remoteLog"
         }
         catch {
             $errMsg = "Ошибка выгрузки лога: $($_.Exception.Message)"

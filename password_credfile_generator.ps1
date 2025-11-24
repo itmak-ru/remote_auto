@@ -1,17 +1,30 @@
-﻿#Requires -RunAsAdministrator
+﻿[CmdletBinding()]
+param (
+    [Parameter(Mandatory=$false)]
+    [string]$PassFTP,
+
+    [Parameter(Mandatory=$false)]
+    [string]$PassFTPS,
+
+    [Parameter(Mandatory=$false)]
+    [string]$PassSMB
+)
+
+# Проверяем, есть ли у нас права администратора
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Host "`nСкрипт необходимо запускать с правами администратора" -ForegroundColor Red
+    exit 1
+}
+
+$silentMode = $PSBoundParameters.ContainsKey('PassFTP') -or $PSBoundParameters.ContainsKey('PassFTPS') -or $PSBoundParameters.ContainsKey('PassSMB')
 
 $credFolder = "C:\ProgramData\Remote_Auto\creds"
 $credFileFtp = Join-Path $credFolder "cred_ftp_pwd.txt"
+$credFileFtps = Join-Path $credFolder "cred_ftps_pwd.txt"
 $credFileSmb = Join-Path $credFolder "cred_smb_pwd.txt"
 $keyFile = Join-Path $credFolder "encryption_key.bin"
-
-# =============================================================================
-# ПРЕДОПРЕДЕЛЕННЫЕ ПАРОЛИ (раскомментируйте при необходимости)
-# Рекомендуется использовать только для тестовых сред!
-# =============================================================================
-# $predefinedFtpPassword = "Your_FTP_Password_Here"
-# $predefinedSmbPassword = "Your_SMB_Password_Here"
-# =============================================================================
 
 try {
     # Создание папки и установка прав доступа
@@ -43,14 +56,20 @@ try {
             [string]$FilePath,
             [string]$ServiceName,
             [byte[]]$Key,
-            [string]$PredefinedPassword = $null
+            [string]$PredefinedPassword = $null,
+            [switch]$Silent = $false
         )
         
         if (Test-Path $FilePath) {
-            $choice = Read-Host "Файл пароля для $ServiceName уже существует. Перезаписать? (Y/N)"
-            if ($choice -notmatch '^[Yy]$') {
-                Write-Host "Обновление пароля $ServiceName пропущено."
-                return
+            if (-not $Silent) {
+                $choice = Read-Host "Файл пароля для $ServiceName уже существует. Перезаписать? (Y/N)"
+                if ($choice -notmatch '^[Yy]$') {
+                    Write-Host "Обновление пароля $ServiceName пропущено."
+                    return
+                }
+            }
+            else {
+                Write-Host "Файл пароля для $ServiceName будет перезаписан (silent режим)."
             }
         }
 
@@ -91,24 +110,100 @@ try {
         }
     }
 
-    # Обработка FTP
-    $generateFtp = Read-Host "Сгенерировать пароль для FTP? (Y/N)"
-    if ($generateFtp -match '^[Yy]$') {
-        # Раскомментируйте следующую строку для использования предопределенного пароля FTP
-        # Update-PasswordFile -FilePath $credFileFtp -ServiceName "FTP" -Key $key -PredefinedPassword $predefinedFtpPassword
-        Update-PasswordFile -FilePath $credFileFtp -ServiceName "FTP" -Key $key
+    # Флаги обработки сервисов
+    $ftpProcessed = $false
+    $ftpsProcessed = $false
+    $smbProcessed = $false
+
+    if ($silentMode) {
+        Write-Host "`nЗапуск в silent режиме" -ForegroundColor Cyan
+
+        # Обработка FTP
+        if ($PSBoundParameters.ContainsKey('PassFTP')) {
+            if (-not [string]::IsNullOrEmpty($PassFTP)) {
+                Update-PasswordFile -FilePath $credFileFtp -ServiceName "FTP" -Key $key -PredefinedPassword $PassFTP -Silent
+                $ftpProcessed = $true
+            }
+            else {
+                Write-Error "Пароль FTP не может быть пустым в silent режиме"
+                exit 1
+            }
+        }
+
+        # Обработка FTPS
+        if ($PSBoundParameters.ContainsKey('PassFTPS')) {
+            if (-not [string]::IsNullOrEmpty($PassFTPS)) {
+                Update-PasswordFile -FilePath $credFileFtps -ServiceName "FTPS" -Key $key -PredefinedPassword $PassFTPS -Silent
+                $ftpsProcessed = $true
+            }
+            else {
+                Write-Error "Пароль FTPS не может быть пустым в silent режиме"
+                exit 1
+            }
+        }
+
+        # Обработка SMB
+        if ($PSBoundParameters.ContainsKey('PassSMB')) {
+            if (-not [string]::IsNullOrEmpty($PassSMB)) {
+                Update-PasswordFile -FilePath $credFileSmb -ServiceName "SMB" -Key $key -PredefinedPassword $PassSMB -Silent
+                $smbProcessed = $true
+            }
+            else {
+                Write-Error "Пароль SMB не может быть пустым в silent режиме"
+                exit 1
+            }
+        }
+    }
+    else {
+        # Интерактивный режим
+        # Обработка FTP
+        if (-not [string]::IsNullOrEmpty($predefinedFtpPassword)) {
+            Write-Host "`nОбнаружен предопределенный пароль FTP. Автоматическая генерация файла." -ForegroundColor Green
+            Update-PasswordFile -FilePath $credFileFtp -ServiceName "FTP" -Key $key -PredefinedPassword $predefinedFtpPassword
+            $ftpProcessed = $true
+        }
+        else {
+            $generateFtp = Read-Host "`nСгенерировать пароль для FTP? (Y/N)"
+            if ($generateFtp -match '^[Yy]$') {
+                Update-PasswordFile -FilePath $credFileFtp -ServiceName "FTP" -Key $key
+                $ftpProcessed = $true
+            }
+        }
+
+        # Обработка FTPS
+        if (-not [string]::IsNullOrEmpty($predefinedFtpsPassword)) {
+            Write-Host "`nОбнаружен предопределенный пароль FTPS. Автоматическая генерация файла." -ForegroundColor Green
+            Update-PasswordFile -FilePath $credFileFtps -ServiceName "FTPS" -Key $key -PredefinedPassword $predefinedFtpsPassword
+            $ftpsProcessed = $true
+        }
+        else {
+            $generateFtps = Read-Host "`nСгенерировать пароль для FTPS? (Y/N)"
+            if ($generateFtps -match '^[Yy]$') {
+                Update-PasswordFile -FilePath $credFileFtps -ServiceName "FTPS" -Key $key
+                $ftpsProcessed = $true
+            }
+        }
+
+        # Обработка SMB
+        if (-not [string]::IsNullOrEmpty($predefinedSmbPassword)) {
+            Write-Host "`nОбнаружен предопределенный пароль SMB. Автоматическая генерация файла." -ForegroundColor Green
+            Update-PasswordFile -FilePath $credFileSmb -ServiceName "SMB" -Key $key -PredefinedPassword $predefinedSmbPassword
+            $smbProcessed = $true
+        }
+        else {
+            $generateSmb = Read-Host "`nСгенерировать пароль для SMB? (Y/N)"
+            if ($generateSmb -match '^[Yy]$') {
+                Update-PasswordFile -FilePath $credFileSmb -ServiceName "SMB" -Key $key
+                $smbProcessed = $true
+            }
+        }
     }
 
-    # Обработка SMB
-    $generateSmb = Read-Host "Сгенерировать пароль для SMB? (Y/N)"
-    if ($generateSmb -match '^[Yy]$') {
-        # Раскомментируйте следующую строку для использования предопределенного пароля SMB
-        # Update-PasswordFile -FilePath $credFileSmb -ServiceName "SMB" -Key $key -PredefinedPassword $predefinedSmbPassword
-        Update-PasswordFile -FilePath $credFileSmb -ServiceName "SMB" -Key $key
-    }
-
-    if (($generateFtp -notmatch '^[Yy]$') -and ($generateSmb -notmatch '^[Yy]$')) {
+    if (-not ($ftpProcessed -or $ftpsProcessed -or $smbProcessed)) {
         Write-Host "Операция отменена: не выбран ни один сервис для генерации пароля."
+    }
+    else {
+        Write-Host "`nОперации завершены успешно" -ForegroundColor Green
     }
 }
 finally {
@@ -125,17 +220,40 @@ finally {
             $predefinedFtpPassword = $null
             Remove-Variable predefinedFtpPassword -ErrorAction SilentlyContinue
         }
+
+        if (Test-Path variable:predefinedFtpsPassword) {
+            $predefinedFtpsPassword = $null
+            Remove-Variable predefinedFtpsPassword -ErrorAction SilentlyContinue
+        }
         
         if (Test-Path variable:predefinedSmbPassword) {
             $predefinedSmbPassword = $null
             Remove-Variable predefinedSmbPassword -ErrorAction SilentlyContinue
         }
         
+        # Очистка параметров silent режима
+        if (Test-Path variable:PassFTP) {
+            $PassFTP = $null
+            Remove-Variable PassFTP -ErrorAction SilentlyContinue
+        }
+
+        if (Test-Path variable:PassFTPS) {
+            $PassFTPS = $null
+            Remove-Variable PassFTPS -ErrorAction SilentlyContinue
+        }
+
+        if (Test-Path variable:PassSMB) {
+            $PassSMB = $null
+            Remove-Variable PassSMB -ErrorAction SilentlyContinue
+        }
+        
         # Очистка временных переменных
         $generateFtp = $null
+        $generateFtps = $null
         $generateSmb = $null
         $credFolder = $null
         $credFileFtp = $null
+        $credFileFtps = $null
         $credFileSmb = $null
         $keyFile = $null
         

@@ -18,8 +18,8 @@ catch {
 $protocolScripts = $config.protocolScripts
 $protocolLogs = $config.protocolLogs
 
-if (-not ($protocolScripts -in @("smb", "ftp")) -or -not ($protocolLogs -in @("smb", "ftp"))) {
-    Write-Error "Неверный протокол в конфиге. Допустимые значения: 'smb' или 'ftp'"
+if (-not ($protocolScripts -in @("smb", "ftp", "ftps")) -or -not ($protocolLogs -in @("smb", "ftp", "ftps"))) {
+    Write-Error "Неверный протокол. Допустимые значения: 'smb', 'ftp', 'ftps'"
     exit 1
 }
 
@@ -31,7 +31,7 @@ function Get-ProtocolCredentials {
         [Parameter(Mandatory=$true)]
         [string]$ProtocolType,
         [Parameter(Mandatory=$true)]
-        [ValidateSet('smb','ftp')]
+        [ValidateSet('smb','ftp','ftps')]
         [string]$Protocol
     )
     
@@ -69,7 +69,7 @@ function Get-ProtocolCredentials {
         }
 
         # Создание учетных данных
-        if ($Protocol -eq 'ftp') {
+        if ($Protocol -in @("ftp", "ftps")) {
             return New-Object System.Net.NetworkCredential($user, $securePass)
         }
         else {
@@ -92,7 +92,7 @@ $credLogs = Get-ProtocolCredentials -ProtocolConfig $configLogs -ProtocolType "�
 
 # ===== ФОРМИРОВАНИЕ ПУТЕЙ =====
 # Для скриптов
-if ($protocolScripts -eq "ftp") {
+if ($protocolScripts -in @("ftp", "ftps")) {
     $remoteScriptsPath = "ftp://$($configScripts.server)/$($configScripts.scriptsFullPath)/" -replace '(?<!:)/{2,}', '/'
 }
 else {
@@ -101,7 +101,7 @@ else {
 }
 
 # Для логов
-if ($protocolLogs -eq "ftp") {
+if ($protocolLogs -in @("ftp", "ftps")) {
     $remoteLogsPath = "ftp://$($configLogs.server)/$($configLogs.logsFullPath)/" -replace '(?<!:)/{2,}', '/'
 }
 else {
@@ -161,39 +161,68 @@ if ($alreadyExecuted) {
 $scriptExists = $false
 $localScript = Join-Path $localScriptsDir $targetScriptName
 
-if ($protocolScripts -eq "ftp") {
-    # Проверка через FTP
-    $ftpRequest = [System.Net.FtpWebRequest]::Create($remoteScriptsPath)
-    $ftpRequest.Credentials = $credScripts
-    $ftpRequest.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectory
-
+if ($protocolScripts -in @("ftp", "ftps")) {
+    # Проверка через FTP / FTPS
     try {
-        $response = $ftpRequest.GetResponse()
-        $streamReader = New-Object IO.StreamReader($response.GetResponseStream())
-        $files = $streamReader.ReadToEnd() -split "`r`n"
-        $scriptExists = $files -contains $targetScriptName
-        $streamReader.Close()
-        $response.Close()
-    }
-    catch {
-        Write-Error "Ошибка подключения к FTP (скрипты): $_"
-        exit 1
-    }
+        # Формирование полного пути
+        $remoteScript = "${remoteScriptsPath}${targetScriptName}"
+        
+        # Создание запроса
+        $request = [System.Net.FtpWebRequest]::Create($remoteScript)
+        $request.Credentials = $credScripts
 
-    # Загрузка скрипта
-    if ($scriptExists) {
-        try {
-            $webClient = New-Object System.Net.WebClient
-            $webClient.Credentials = $credScripts
-            $remoteScript = "${remoteScriptsPath}${targetScriptName}"
-            $webClient.DownloadFile($remoteScript, $localScript)
-            $webClient.Dispose()
+        # Включаем SSL только для FTPS
+        if ($protocolScripts -eq "ftps") {
+            $request.EnableSsl = $true
         }
+
+        $request.Method = [System.Net.WebRequestMethods+Ftp]::GetFileSize
+        
+        try {
+            # Проверка существования файла
+            $response = $request.GetResponse()
+            $scriptExists = $true
+            $response.Close()
+        }
+        catch [System.Net.WebException] {
+            if ($_.Exception.Response.StatusCode -eq [System.Net.FtpStatusCode]::ActionNotTakenFileUnavailable) {
+                $scriptExists = $false
+            }
+            else {
+                throw
+            }
+        }
+        
+        # Загрузка файла
+        if ($scriptExists) {
+            $request = [System.Net.FtpWebRequest]::Create($remoteScript)
+            $request.Credentials = $credScripts
+
+            # Включаем SSL только для FTPS
+            if ($protocolScripts -eq "ftps") {
+                $request.EnableSsl = $true
+            }
+
+            $request.Method = [System.Net.WebRequestMethods+Ftp]::DownloadFile
+            
+            $response = $request.GetResponse()
+            $responseStream = $response.GetResponseStream()
+            $fileStream = [System.IO.File]::Create($localScript)
+            
+            $buffer = New-Object byte[] 10240
+            while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $fileStream.Write($buffer, 0, $read)
+            }
+            
+            $fileStream.Close()
+            $responseStream.Close()
+            $response.Close()
+        }
+    }
         catch {
             Write-Error "Ошибка загрузки скрипта: $_"
             exit 1
         }
-    }
 }
 else {
     # Работа с SMB
@@ -297,17 +326,28 @@ try {
     }
 
     # ===== ОТПРАВКА ЛОГА =====
-    if ($protocolLogs -eq "ftp") {
-        # Выгрузка на FTP
+    if ($protocolLogs -in @("ftp", "ftps")) {
+        # Отправка через FTP / FTPS
         try {
-            $webClient = New-Object System.Net.WebClient
-            $webClient.Credentials = $credLogs
-            
             $remoteLog = "${remoteLogsPath}$logName"
-            $webClient.UploadFile($remoteLog, [System.Net.WebRequestMethods+Ftp]::UploadFile, $localLog)
-            $webClient.Dispose()
             
-            Write-Log "Лог успешно выгружен на FTP: $remoteLog"
+            $request = [System.Net.FtpWebRequest]::Create($remoteLog)
+            $request.Credentials = $credLogs
+            $request.Method = [System.Net.WebRequestMethods+Ftp]::UploadFile
+            
+            if ($protocolLogs -eq "ftps") {
+                $request.EnableSsl = $true
+            }
+            
+            $fileContent = [System.IO.File]::ReadAllBytes($localLog)
+            $requestStream = $request.GetRequestStream()
+            $requestStream.Write($fileContent, 0, $fileContent.Length)
+            $requestStream.Close()
+            
+            $response = $request.GetResponse()
+            $response.Close()
+            
+            Write-Log "Лог успешно выгружен на $($protocolLogs.ToUpper()): $remoteLog"
         }
         catch {
             $errMsg = "Ошибка выгрузки лога: $($_.Exception.Message)"
